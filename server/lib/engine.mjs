@@ -4,12 +4,14 @@ import path from 'node:path';
 import { scanCodex } from './codex.mjs';
 import { scanClaude } from './claude.mjs';
 import { readCodexAccount } from './codex-account.mjs';
-import { commandOutcome, processAlive } from './send-result.mjs';
+import { commandOutcome, commandProgress, processAlive } from './send-result.mjs';
+import { runDesktopCommand, desktopOutcome, readDesktopReceipt, requestKey } from './claude-desktop.mjs';
 import { findCodexBin, findClaudeBin, buildCommand, describeCommand, runCommand, relocatedWorkspace } from './sender.mjs';
 
 const HOUR = 3600 * 1000;
 export const sessionKey = s => `${s.source}:${s.id}:${s.blockedAt}`;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const submissionOf=rec=>({at:rec.at,transport:rec.transport||'cli',message:rec.message,messageUuid:rec.messageUuid});
 
 // Codex：如果记录到的额度仍是满的且还没到重置时间，恢复时间以额度为准
 function effectiveRecoverAt(s, quota, now) {
@@ -46,10 +48,11 @@ export function classify(session, { config, state, quota, now }) {
 }
 
 export class Engine {
-  constructor({ store, env = process.env, now = () => Date.now(), runner = runCommand, notifier = () => {}, homes, wait = sleep, accountReader = readCodexAccount, findBins } = {}) {
+  constructor({ store, env = process.env, now = () => Date.now(), runner = runCommand, desktopRunner = runDesktopCommand, notifier = () => {}, homes, wait = sleep, accountReader = readCodexAccount, findBins } = {}) {
     this.store = store;
     this.now = now;
     this.runner = runner;
+    this.desktopRunner = desktopRunner;
     this.wait = wait;
     this.notifier = notifier;
     this.env = env;
@@ -102,7 +105,22 @@ export class Engine {
 
   recoverSends() {
     for (const rec of Object.values(this.state.sends)) {
-      if (rec.mode !== 'real' || this.activeSends.has(rec.key)) continue;
+      if (rec.mode !== 'real') continue;
+      if(rec.transport==='claude-desktop') {
+        if(!['sent','unconfirmed'].includes(rec.status) || !rec.requestId)continue;
+        const receipt=readDesktopReceipt(this.store.home,rec.requestId);
+        if(!receipt)continue;
+        const outcome=desktopOutcome(receipt,{now:this.now()});
+        const before=JSON.stringify(rec);
+        Object.assign(rec,outcome);
+        rec.messageUuid ||= receipt.uuid;
+        if(outcome.deliveredAt)rec.lastConfirmedSubmission=submissionOf(rec);
+        if(outcome.status==='resumed') {rec.error=null;rec.errorCode=null;rec.finishedAt=this.now();}
+        if(before!==JSON.stringify(rec))this.updateBatch(rec);
+        continue;
+      }
+      if(rec.source==='claude' && rec.status==='sent')rec.progress=commandProgress({logFile:rec.logFile,sessionId:rec.id});
+      if(this.activeSends.has(rec.key))continue;
       if (rec.status === 'failed' && /^退出码 /.test(rec.error || '')) {
         rec.error = commandOutcome({...rec,sessionId:rec.id,code:rec.exitCode || 1,error:null}).error || rec.error;
       }
@@ -175,7 +193,7 @@ export class Engine {
   /** 逐个发送到点的会话；keys 给定时只发这些（“现在就发送”） */
   async sendDue({ keys = null } = {}) {
     if (this.sending) return { started: false, reason: '正在发送中' };
-    const eligible = s => s.auto && (keys ? keys.includes(s.key) && (!s.send || (s.send.status === 'failed' && !s.send.retryPending)) : s.status === 'due');
+    const eligible = s => s.auto && (keys ? keys.includes(s.key) && (!s.send || (s.send.status === 'failed' && !s.send.retryPending && (s.send.retryable!==false || s.send.errorCode==='desktop_unavailable'))) : s.status === 'due');
     const list = this.classified().filter(eligible);
     if (!list.length) return { started: false, reason: '没有到点的会话' };
     this.sending = true;
@@ -226,9 +244,12 @@ export class Engine {
   }
 
   async sendOne(s, dry, attempt = 1, batch = this.now()) {
+    if(this.activeSends.has(s.key))return this.state.sends[s.key];
     this.refreshTools();
     const cmd = buildCommand(s, this.config.message, this.config, this.bins, {env:this.env});
-    const base = { key:s.key,source:s.source,id:s.id,title:s.title,project:s.project,cwd:s.cwd,entrypoint:s.entrypoint,blockedAt:s.blockedAt,recoverAt:s.recoverAt,kind:s.kind,message:this.config.message,at:this.now(),batch,command:describeCommand(cmd),attempt };
+    const base = { key:s.key,source:s.source,id:s.id,title:s.title,project:s.project,cwd:s.cwd,entrypoint:s.entrypoint,blockedAt:s.blockedAt,recoverAt:s.recoverAt,kind:s.kind,message:this.config.message,at:this.now(),batch,command:describeCommand(cmd),attempt,transport:cmd.transport || 'cli' };
+    const prior=this.state.sends[s.key];
+    if(prior?.mode==='real')base.previousSubmission=prior.lastConfirmedSubmission||prior.previousSubmission||submissionOf(prior);
     if (dry) {
       const rec = { ...base, mode: 'dry', status: 'simulated' };
       this.state.sends[s.key] = rec;
@@ -236,35 +257,46 @@ export class Engine {
       return rec;
     }
     const logFile = path.join(this.store.logsDir, `${s.source}-${s.id}-${base.at}.log`);
-    const run = this.runner(cmd, { logFile });
+    const rec = { ...base, mode:'real',status:'sent',logFile,progress:{phase:'starting'} };
+    this.activeSends.add(rec.key);
+    this.state.sends[s.key]=rec;
+    this.store.saveState();
+    const onProgress=update=>{if(this.state.sends[s.key]===rec){const before=JSON.stringify(rec);Object.assign(rec,update);if(update.deliveredAt)rec.lastConfirmedSubmission=submissionOf(rec);if(before!==JSON.stringify(rec))this.store.saveState();}};
+    cmd.requestId=requestKey(`${s.key}:${base.at}:${attempt}`);
+    if(cmd.transport==='claude-desktop')rec.requestId=cmd.requestId;
+    let run;
+    try {run=cmd.transport==='claude-desktop' ? await this.desktopRunner(cmd,{home:this.store.home,claudeHome:this.homes.claude,logFile,onProgress}) : this.runner(cmd,{home:this.store.home,logFile,onProgress});}
+    catch(error){run={error:error.message,retryable:false};}
     if (run.error) {
-      const rec = { ...base, mode: 'real', status: 'failed', error: run.error, logFile };
-      this.state.sends[s.key] = rec;
+      this.activeSends.delete(rec.key);
+      Object.assign(rec,{status:run.status||'failed',error:run.error,errorCode:run.errorCode,retryable:run.retryable,finishedAt:this.now()});
       this.store.saveState();
-      if (this.config.retry && attempt === 1) return this.retryOne(s, rec, 5000);
+      if (this.config.retry && attempt === 1 && run.retryable!==false && rec.transport!=='claude-desktop') return this.retryOne(s, rec, 5000);
       return rec;
     }
-    const rec = { ...base, mode: 'real', status: 'sent', pid: run.pid, logFile };
-    this.activeSends.add(rec.key);
-    this.state.sends[s.key] = rec;
+    Object.assign(rec,{pid:run.pid,requestId:run.requestId,messageUuid:run.messageUuid});
     this.store.saveState();
     // 两分钟内就报错退出，多半是没接上（例如额度其实还没恢复）：等一分钟按设置重试一次
-    run.done.then(async ({ code, error }) => {
+    run.done.then(async (outcome) => {
       this.activeSends.delete(rec.key);
       const cur = this.state.sends[s.key];
       if (cur !== rec) return;
-      ({code,error} = commandOutcome({...rec,sessionId:rec.id,code,error}));
+      if(rec.transport!=='claude-desktop')outcome={...outcome,...commandOutcome({...rec,sessionId:rec.id,...outcome})};
+      const {code,error}=outcome;
+      Object.assign(cur,outcome);
       cur.exitCode = code;
       cur.finishedAt = this.now();
-      if (code !== 0 || error) {
+      if(outcome.status==='unconfirmed')cur.status='unconfirmed';
+      else if (code !== 0 || error) {
         cur.status = 'failed';
         cur.error = error || `退出码 ${code}`;
       }
       else {
         cur.status = 'resumed';
+        cur.error=null;cur.errorCode=null;
       }
       this.updateBatch(cur);
-      if (cur.status === 'failed' && this.config.retry && attempt === 1 && this.now() - base.at < 120000) {
+      if (cur.status === 'failed' && cur.retryable!==false && rec.transport!=='claude-desktop' && this.config.retry && attempt === 1 && this.now() - base.at < 120000) {
         await this.retryOne(s, cur, 60000);
       }
     });
@@ -282,6 +314,7 @@ export class Engine {
   }
 
   view() {
+    this.recoverSends();
     const now = this.now();
     const sessions = this.classified()
       .sort((a, b) => (a.recoverAt ?? Infinity) - (b.recoverAt ?? Infinity))

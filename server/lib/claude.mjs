@@ -43,12 +43,16 @@ function titleOf(records) {
 
 // 只认领本软件发出的那一轮 API 失败。用户的新消息或有效回复都会解除认领。
 function failedContinuation(records, attempt, message) {
-  if (!attempt || !['sent','failed'].includes(attempt.status)) return null;
+  if (!attempt || !['sent','failed','unconfirmed'].includes(attempt.status)) return null;
   const last=records.findLast(r=>r.type==='assistant' || r.type==='user');
   const user=records.findLast(r=>r.type==='user');
-  if (last?.type!=='assistant' || !last.isApiErrorMessage || !user) return null;
+  if (!user || !(last===user || last?.type==='assistant'&&last.isApiErrorMessage)) return null;
   const submitted=Date.parse(user.timestamp);
-  if (user.entrypoint!=='sdk-cli' || submitted < attempt.at-2000 || submitted > attempt.at+120000 || textOf(user)!==(attempt.message || message)) return null;
+  const owned=[attempt,attempt.lastConfirmedSubmission,attempt.previousSubmission].filter(Boolean).some(submission=>{
+    const matches = submission.transport==='claude-desktop' ? !!submission.messageUuid && user.uuid===submission.messageUuid : user.entrypoint==='sdk-cli';
+    return matches && submitted>=submission.at-2000 && submitted<=submission.at+120000 && textOf(user)===(submission.message || message);
+  });
+  if (!owned) return null;
   const original=records.find(r=>isLimitRecord(r) && Date.parse(r.timestamp)===attempt.blockedAt);
   if (!original && attempt.recoverAt == null) return null;
   const b = original ? {blockedAt:attempt.blockedAt,text:textOf(original),...parseClaudeLimit(textOf(original),attempt.blockedAt),last:original} :

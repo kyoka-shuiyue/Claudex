@@ -83,11 +83,13 @@
   /* ---------- 接口 ---------- */
   async function request(path, body) {
     const my = ++seqReq, t0 = Date.now();
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),body===undefined?8000:20000);
     let res, data = null;
     try {
-      res = await fetch(path, body === undefined ? { cache: 'no-store' } : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-    } catch { setOffline(true); return { net: true, err: 'Claudex 服务没有响应' }; }
+      res = await fetch(path, body === undefined ? { cache: 'no-store',signal:controller.signal } : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),signal:controller.signal });
+    } catch { clearTimeout(timer);setOffline(true); return { net: true, err: controller.signal.aborted?'请求超时，正在重新连接；提交结果请以发送记录为准。':'Claudex 服务没有响应' }; }
     try { data = await res.json(); } catch {}
+    finally {clearTimeout(timer);}
     const hasState = data && typeof data.now === 'number';
     if (hasState && my >= seqApplied) { seqApplied = my; offset = data.now - (t0 + Date.now()) / 2; apply(data); }
     if (res.ok && hasState) return { ok: true };
@@ -100,7 +102,7 @@
   }
   function schedulePoll() {
     clearTimeout(pollTimer);
-    const d = offline ? 5000 : V?.diagnostics?.codex?.status === 'running' ? 1000 : V && (V.sending || V.checking || V.sent.some(r => r.status === 'sent')) ? 3000 : 15000;
+    const d = offline ? 5000 : V?.diagnostics?.codex?.status === 'running' ? 1000 : V && (V.sending || V.checking || V.sent.some(r => ['sent','unconfirmed'].includes(r.status))) ? 2000 : 15000;
     pollTimer = setTimeout(refresh, d);
   }
   function setOffline(v) {
@@ -416,11 +418,22 @@
   function statHTML(r) {
     const t = '<span class="num">' + hms(r.at) + '</span>';
     if (r.status === 'simulated') return '<span class="stat sim" title="演练：只记录了命令，没有真的发送">已演练 ' + t + '</span>';
-    if (r.status === 'sent') return '<span class="stat" title="请求已提交，正在等待 Codex / Claude 完成这一轮">正在续接 ' + t + '</span>';
-    if (r.status === 'resumed') return '<span class="stat">已接上 ' + CHECK + '</span>';
+    if (r.status === 'sent') {
+      const phase=r.progress?.phase,labels={starting:'正在连接',submitting:'正在投递',waiting_response:'等待模型回复',delivered:'桌面已收信',responding:'模型正在回复',retrying:'连接重试中'};
+      return '<span class="stat pending" title="'+esc(sendExplanation(r))+'">'+(labels[phase]||'等待续接确认')+' '+t+'</span>';
+    }
+    if(r.status==='unconfirmed')return '<button class="stat pending" type="button" data-act="details">'+(r.deliveredAt?'已送达 · 待回复':'投递待核对')+'</button>';
+    if (r.status === 'resumed') return '<span class="stat">已接上'+(r.source==='claude'?(r.transport==='claude-desktop'?' · 桌面':' · CLI'):'')+' ' + CHECK + '</span>';
     const session = V.sessions.find(s=>s.key===r.key);
-    const retry = !V.config.dryRun && session?.auto && session.recoverAt && session.recoverAt<=nowMs() && !r.retryPending;
+    const retry = !V.config.dryRun && session?.auto && session.recoverAt && session.recoverAt<=nowMs() && !r.retryPending && (r.retryable!==false || r.errorCode==='desktop_unavailable');
     return '<span class="stat bad">' + (r.retryPending ? '等待重试' : '失败') + '</span>' + (retry ? '<button class="btn g sm" type="button" data-act="retry">重试</button>' : '');
+  }
+  function sendExplanation(r) {
+    if(r.error)return r.error;
+    const seconds=Math.max(0,Math.floor((nowMs()-r.at)/1000));
+    if(r.progress?.phase==='retrying')return '连接失败，正在重试'+(r.progress.httpStatus?' · HTTP '+r.progress.httpStatus:'')+'；已等待 '+seconds+' 秒，尚未确认模型回复。';
+    if(r.status==='sent')return r.deliveredAt?'消息已进入原 Claude 桌面会话，正在等待模型回复。':'正在连接'+(r.transport==='claude-desktop'?'原 Claude 桌面会话':' CLI')+'；已等待 '+seconds+' 秒。';
+    return '';
   }
   function rowHTML(o) {
     const open = ui.expanded.has(ui.tab + '|' + o.key);
@@ -456,7 +469,7 @@
       return V.sent.map(r => rowHTML({
         key: r.key, title: r.title, cmd: r.command, right: statHTML(r),
         meta: chip(r.source) + project(r.project) + '',
-        why: r.status === 'failed' ? r.error || '发送失败' : '', bad: true,
+        why: sendExplanation(r), bad: r.status==='failed',
       })).join('') || emptyHTML('还没有发送记录', '额度恢复后，Claudex 自动发出的继续会记录在这里');
     }
     return V.sessions.filter(s => !s.auto && !s.send).map(sessionRow).join('') || emptyHTML('没有跳过的会话', '续跑类会话、恢复已过去太久的会话，以及你手动跳过的会话，会放在这里');
@@ -523,6 +536,10 @@
       b.disabled=true;b.textContent='提交中…';
       const result=await request('/api/send-now',{keys:[row.dataset.key]});
       if (!result.ok) {b.disabled=false;b.textContent='重试';flashErr(b,result.err);}
+    }
+    else if(b.dataset.act==='details') {
+      const send=V.sent.find(item=>item.key===row.dataset.key);
+      if(send)showDetail('续接状态',sendExplanation(send));
     }
     else if (b.dataset.act === 'cmd') {
       const k = ui.tab + '|' + row.dataset.key, open = !row.classList.contains('open');
@@ -594,10 +611,12 @@
   function renderSettings() {
     if (!V) return;
     const g = V.config.staggerSeconds;
-    $('#gapLabel').textContent = gapText(g);
+    $('#gapLabel').textContent = innerHeight<=560?'发送间隔':gapText(g);
+    $('#gapLabel').title=gapText(g);
     $$('#gapSeg button').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.gap === g)));
     setSwitch($('#swRetry'), V.config.retry);
   }
+  addEventListener('resize',()=>{if(V)renderSettings();});
   const history = $('.log');
   $('#quotas').after(history);
   const logTitle = history.querySelector('h3');
@@ -625,10 +644,10 @@
     $('[data-log="older"]', logNav).disabled = index >= logs.length - 1;
     if (!l) { put($('#log'), '<div class="it none">还没有发送记录</div>', 'log'); return; }
     const failed = l.count - l.ok;
-    const active = l.items?.filter(r => r.status === 'sent').length || 0;
+    const active = l.items?.filter(r => ['sent','unconfirmed'].includes(r.status)).length || 0;
     const body = l.mode === 'dry' ? '演练 · 已记录 ' + l.count + ' 条继续请求'
       : failed ? l.count + ' 条继续请求 · <span class="bad">' + failed + ' 个失败</span>'
-      : active ? '已提交 ' + l.count + ' 条继续 · ' + active + ' 个正在续接'
+      : active ? '处理 ' + l.count + ' 条继续 · ' + active + ' 个等待确认'
       : '已向 ' + l.count + ' 个会话发送继续 · <span class="ok">全部接上</span>';
     const changed = put($('#log'), '<div class="it"><b>' + dayStamp(l.at) + '</b>' + body + '</div>', 'log');
     if (changed && index === 0 && lastLogAt != null && l.at > lastLogAt && !reduce) $('#log .it').classList.add('new');
@@ -667,12 +686,15 @@
     put(connectionEl, '<div class="connection-head"><h3>Codex 连接</h3><span class="connection-status ' + (d.status === 'success' ? 'ok' : d.status === 'failed' ? 'bad' : '') + '"' + (busy ? ' aria-live="off"' : ' role="status"') + '>' + esc(text) + '</span></div>' +
       '<div class="connection-actions"><button class="sw" type="button" role="switch" aria-checked="' + (V.config.codex?.useSystemProxy !== false) + '" id="proxySwitch"' + (busy ? ' disabled' : '') + '><i></i>跟随系统代理</button><button class="btn g sm" type="button" id="testCodex"' + (busy || !V.tools.codex ? ' disabled' : '') + '>' + (busy ? '测试中…' : '试发 Codex') + '</button></div>' +
       '<p class="connection-hint">试发会向专用测试会话发送真实消息。</p>' +
-      (d.status === 'failed' ? '<button type="button" class="lnk connection-error" data-details="connection">查看失败原因</button>' : ''), 'connection');
+      (d.status === 'failed' ? '<button type="button" class="lnk connection-error" data-details="connection">查看失败原因</button>' : '')+
+      '<div class="desktop-connection"><b>Claude 桌面</b><span>'+(V.claudeDesktop?.connected?V.claudeDesktop.connected+' 个会话已接入':V.claudeDesktop?.installed?'接入已安装 · 等待会话启动':'尚未接入')+'</span><button class="lnk" type="button" id="claudeIntegration">'+(V.claudeDesktop?.installed?'接入说明':'启用本地接入')+'</button></div>', 'connection');
   }
   connectionEl.addEventListener('click', async e => {
     const button = e.target.closest('button'); if (!button || !V) return;
     if (button.dataset.details === 'connection') {
       showDetail('Codex 连接失败', V.diagnostics?.codex?.error || '请检查 Codex 登录与网络后重试');
+    } else if(button.id==='claudeIntegration') {
+      showIntegration();
     } else if (button.id === 'proxySwitch') {
       button.disabled = true;
       await setConfig({ codex: { useSystemProxy: V.config.codex?.useSystemProxy === false } }, button);
@@ -685,6 +707,25 @@
       if (!r.ok) { flashErr(button, r.err); renderConnection(); }
     }
   });
+  async function showIntegration() {
+    let preview;
+    try {const response=await fetch('/api/claude-integration',{signal:AbortSignal.timeout(8000)});preview=await response.json();if(!response.ok)throw new Error(preview.error);}
+    catch(error){showDetail('Claude 接入',error.message||'无法读取接入设置');return;}
+    if(preview.alreadyInstalled){showDetail('Claude 桌面接入已安装','新启动或恢复的会话会自动接入。已经运行但尚未接入的会话，需要重新启动该会话进程。投递通过原桌面会话处理，消息送达与模型回复分别确认。');return;}
+    const dialog=document.createElement('dialog');dialog.className='detail-dialog';
+    dialog.innerHTML='<h3>启用 Claude 桌面接入</h3><p>将为 Claude 添加一个 SessionStart 钩子，让 Claudex 能向已登录的原桌面会话发送续接消息。会先备份设置，并保留已有条目。</p><p class="integration-path"></p><p>新启动或恢复的会话接入后生效。</p><div class="row"><button class="btn g sm" data-integration="cancel">取消</button><button class="btn p sm" data-integration="install">备份并安装接入</button></div>';
+    $('.integration-path',dialog).textContent=preview.file+'\n'+preview.command;
+    document.body.append(dialog);dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+    dialog.addEventListener('click',async event=>{
+      const action=event.target.closest('[data-integration]');if(!action)return;
+      if(action.dataset.integration==='cancel')return dialog.close();
+      action.disabled=true;action.textContent='正在安装…';
+      const result=await request('/api/claude-integration/install',{expectedHash:preview.expectedHash});
+      if(result.ok){dialog.close();showDetail('本地接入已安装','设置已备份。请重新启动尚未接入的 Claude 会话，让本地投递生效。');}
+      else {action.disabled=false;action.textContent='备份并安装接入';flashErr(action,result.err);}
+    });
+    dialog.showModal();$('[data-integration="cancel"]',dialog).focus();
+  }
 
   /* ---------- 开关与分段 ---------- */
   const flip = el => el.getAttribute('aria-checked') !== 'true';

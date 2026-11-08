@@ -17,8 +17,8 @@ $n.Dispose()
 export function notifyText({ kind, dry, count, ok }) {
   if (kind === 'recovered') return { title: 'Claudex', body: `额度已恢复：${count} 个会话可以继续了（自动发送已关闭）` };
   if (dry) return { title: 'Claudex · 演练', body: `到点了：本应给 ${count} 个会话发送继续（演练模式，没有真的发送）` };
-  if (ok === count) return { title: 'Claudex', body: `已给 ${count} 个会话发送继续` };
-  return { title: 'Claudex', body: `给 ${count} 个会话发送继续：${ok} 个成功，${count - ok} 个失败` };
+  if (ok === count) return { title: 'Claudex', body: `已开始处理 ${count} 个续接请求，投递与回复结果请查看软件` };
+  return { title: 'Claudex', body: `处理 ${count} 个续接请求：${count - ok} 个暂未成功，详情请查看软件` };
 }
 
 export function notify(summary) {

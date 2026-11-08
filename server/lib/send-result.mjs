@@ -36,9 +36,26 @@ export function commandOutcome({source,sessionId,logFile,code,error,requireResul
     if (result.subtype !== 'success' || result.is_error) return {code:code ?? 1,error:safeError(result.errors?.join('; ') || result.result || result.subtype || 'Claude 没有完成这一轮')};
     return {code:code ?? 0,confirmedBy:'result.success'};
   }
+  const timeout=events.findLast(e=>e.type==='claudex' && e.subtype==='startup_timeout');
+  if(timeout)return {code:1,error:safeError(timeout.error),errorCode:'startup_timeout',retryable:false};
   if (line) return {code:code ?? 1,error:safeError(line)};
+  const retry=events.findLast(e=>e.type==='system'&&e.subtype==='api_retry');
+  if(code!=null&&code!==0&&retry)return {code,error:`CLI 连接${retry.error_status?'返回 HTTP '+retry.error_status:''}，重试后仍未确认模型回复。`,errorCode:'network_retry'};
   if (code === 0 && source === 'claude' && requireResult) return {code:1,error:'Claude 已退出，但没有返回完整回合结果；请查看发送日志。'};
   return {code, ...(code != null && code !== 0 ? {error:`退出码 ${code}`} : {})};
+}
+
+export function commandProgress({logFile,sessionId}) {
+  let events=[];
+  try {if(logFile)events=readTailRecords(logFile,{start:65536,max:2*1024*1024,enough:()=>true});}catch{}
+  for(const event of events.reverse()) {
+    if(sessionId && event.session_id && event.session_id!==sessionId)continue;
+    if(event.type==='result')return {phase:event.subtype==='success'&&!event.is_error?'complete':'failed'};
+    if(event.type==='system'&&event.subtype==='api_retry')return {phase:'retrying',attempt:event.attempt,httpStatus:event.error_status || null};
+    if(event.type==='assistant'&&!event.isApiErrorMessage&&!event.error || event.type==='stream_event'&&event.event?.type==='message_start')return {phase:'responding'};
+    if(event.type==='system'&&event.subtype==='init')return {phase:'waiting_response'};
+  }
+  return {phase:'starting'};
 }
 
 export function processAlive(pid) {

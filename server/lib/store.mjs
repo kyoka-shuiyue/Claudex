@@ -10,9 +10,9 @@ export const DEFAULT_CONFIG = {
   autoSend: true,          // 恢复后自动发送继续
   dryRun: true,            // 演练：只记录要执行的命令，不真的发送。确认无误后再关掉
   notify: true,            // 发送完成后用系统通知告诉你
-  staggerSeconds: 30,      // 逐个发送的间隔
+  staggerSeconds: 0,       // 到点即处理，不额外排队等待
   retry: true,             // 发送失败自动重试 1 次
-  graceSeconds: 60,        // 到恢复时间后再等多久才发，避开服务端刚重置的那几秒
+  graceSeconds: 5,         // 避开服务端刚重置的几秒，不再固定等待一分钟
   maxAgeHours: 24,         // 只处理这么久以内中断的会话
   catchUpHours: 2,         // 第一次看到时恢复时间已过去超过这么久的，不自动补发
   excludeTitlePatterns: ['续跑', '因额度中断', '因为额度而中断'], // 续跑类会话默认跳过，避免循环发送
@@ -41,10 +41,10 @@ function writeJson(file, data) {
 }
 
 const merge = (base, over) => {
-  const out = { ...base };
+  const out = structuredClone(base);
   for (const [k, v] of Object.entries(over || {})) {
     out[k] = v && typeof v === 'object' && !Array.isArray(v) && base[k] && typeof base[k] === 'object' && !Array.isArray(base[k])
-      ? merge(base[k], v) : v;
+      ? merge(base[k], v) : structuredClone(v);
   }
   return out;
 };

@@ -18,7 +18,7 @@ Claudex 在 Windows 本机读取 Claude Code 和 Codex 的会话记录，找出�
 
 ## 开始使用
 
-需要已安装 **Ego Browser（Ego Lite）**，以及准备使用并已登录的 Claude Code 或 Codex 本机 CLI。
+需要已安装 **Ego Browser（Ego Lite）**，以及准备使用并已登录的 Claude 桌面应用、Claude Code CLI 或 Codex 本机 CLI。
 
 1. 从 [Releases](https://github.com/kyoka-shuiyue/Claudex/releases/latest) 下载 Windows ZIP，完整解压。
 2. 双击 **安装Claudex.cmd**，默认安装到 `%LOCALAPPDATA%\Programs\Claudex`，并创建桌面快捷方式。
@@ -33,9 +33,17 @@ Claudex 在 Windows 本机读取 Claude Code 和 Codex 的会话记录，找出�
 
 开启「真实发送」后，符合条件的等待会话会收到续接消息。右侧「试发 Codex」是独立连接测试，即使队列处于演练模式，也会向专用测试会话发送一条真实消息。
 
-「沿用原权限」会继承原 Codex 会话最近一轮的 `sandbox_mode`。选择完全访问的原会话时，续接任务也会获得相应访问能力。系统代理开关将代理设置传给 Codex 子进程；Claude 子进程默认也跟随系统 HTTP/HTTPS 代理，可在配置中用 `claude.useSystemProxy=false` 关闭。它们继续使用各自 CLI 的登录与服务商配置。
+「沿用原权限」会继承原 Codex 会话最近一轮的 `sandbox_mode`。选择完全访问的原会话时，续接任务也会获得相应访问能力。系统代理开关将代理设置传给 CLI 子进程；Claude CLI 可在配置中用 `claude.useSystemProxy=false` 关闭。CLI 会使用自己的登录与服务商配置。
 
-发送记录区分「正在续接」「已接上」和「失败」。Claude 只有返回同会话的完整回合结果才确认接上，失败显示具体连接错误。尚未被用户手动继续的失败会话，可以在「已发送」中单独重试。
+发送记录分别显示连接、投递、原会话收信与模型回复。等待核对的请求保留去重，不自动盲发。Claude CLI 需要同会话完整回合结果；桌面需要原会话确认消息 UUID，并看到模型有效回复，才显示已接上。
+
+### Claude 桌面接入
+
+在右侧选择「启用本地接入」，查看变更后确认安装。软件会先备份 Claude 设置，再追加自己的 `SessionStart` 钩子，保留已有设置。新启动或恢复的会话会运行一个本地接入子进程。
+
+桌面会话通过自己的本机消息 inbox 接收继续，沿用桌面的登录、模型和权限。未连接时会尝试在 Claude 桌面打开原会话；已在运行但尚未接入的旧会话，需要重新启动该会话进程。未完成接入时显示原因。桌面登录不会自动成为独立 CLI 的登录。
+
+恢复后的默认缓冲为 5 秒，任务默认不额外排队。CLI 两分钟没有开始回复时会停止该次请求；已开始执行的长任务继续运行。消息投递确认与模型等待分别计时，网络与模型速度仍会影响回复时间。
 
 ## 当前验证范围
 
@@ -47,8 +55,10 @@ Claudex 在 Windows 本机读取 Claude Code 和 Codex 的会话记录，找出�
 | Codex 原会话续接 | 专用测试会话实发成功，保留上下文和沙箱权限 |
 | Codex 账户识别 | 实际只读 RPC 获取套餐与本周额度，支持缺失周期和历史读数回退 |
 | Claude Code 续接 | 独立测试会话真实续接成功，会话 ID 一致，并正确回忆上一轮验证标记 |
+| Claude 桌面投递 | 本机独立桌面会话保留上下文并完成文件读写；消息约 0.24 秒送达、7.3 秒开始回复、14.8 秒完成该测试（一次实测） |
+| 重复请求与重启 | 真实桌面中 1,000 次调度请求及 1,000 次本地重放仅形成一条消息；调度器重启未重复发送 |
 
-Claude Code 的精确额度依赖可选的状态栏同步；桌面界面的即时同步仍需结合具体版本确认。开机自启和已有定时任务需要使用者单独配置。
+Claude Code 的精确额度依赖可选的状态栏同步。普通 CLI 续接记录可能稍后才同步到桌面，桌面接入直接向原桌面进程投递。开机自启和已有定时任务需要使用者单独配置。
 
 ## 从源码运行
 
@@ -67,13 +77,13 @@ npm start
 .\launch\build.ps1 -NodeDirectory C:\tools\node-v22.22.3-win-x64
 ```
 
-产物位于 `dist/Claudex-Windows-0.3.1.zip`。构建使用 Windows 自带的 .NET Framework C# 编译器生成启动器。
+产物位于 `dist/Claudex-Windows-0.3.2.zip`。构建使用 Windows 自带的 .NET Framework C# 编译器生成启动器。
 
 ## 本机数据
 
-界面服务只监听 `127.0.0.1:4317`。配置、队列状态、诊断结果和日志保存到用户目录下的 `.claudex`。会话数据从本机 `.codex` 和 `.claude` 目录读取。账户接口只调用 `account/read` 和 `account/rateLimits/read`，不发起模型回合，不保存邮箱、账户 ID 或凭据。启用真实发送时，对应 CLI 使用自己的登录状态执行续接。
+界面服务只监听 `127.0.0.1:4317`。配置、队列状态、诊断结果和日志保存到用户目录下的 `.claudex`。会话数据从本机 `.codex` 和 `.claude` 目录读取。账户接口只调用 `account/read` 和 `account/rateLimits/read`，不发起模型回合，不保存邮箱、账户 ID 或凭据。本地桌面接入的临时 inbox token 只留在会话子进程内，不转存桌面账户凭据。`.claudex` 内的本地接入数据与设置备份也属于私人运行数据，不能上传。
 
-接口与代理行为参照 [Codex app-server 文档](https://learn.chatgpt.com/docs/app-server)及 [Claude Code 网络配置](https://code.claude.com/docs/en/network-config)。
+接口与代理行为参照 [Codex app-server 文档](https://learn.chatgpt.com/docs/app-server)、[Claude 本机会话消息](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket)与 [Claude 桌面环境配置](https://code.claude.com/docs/en/desktop#environment-variables-desktop-sets-itself)。
 
 ## 许可证
 

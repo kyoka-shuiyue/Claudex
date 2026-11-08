@@ -8,6 +8,8 @@ import { createStore } from './lib/store.mjs';
 import { Engine } from './lib/engine.mjs';
 import { notify } from './lib/notify.mjs';
 import { CodexDiagnostics } from './lib/diagnostics.mjs';
+import { integrationPreview,installIntegration } from './lib/claude-integration.mjs';
+import { bridgeDirectory,readRegistration } from './lib/claude-desktop.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'app');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json', '.woff2': 'font/woff2', '.png': 'image/png', '.ico': 'image/x-icon', '.svg': 'image/svg+xml' };
@@ -62,7 +64,15 @@ export function createServer({ store = createStore(), engine, diagnostics, port 
   engine ??= new Engine({ store, notifier: notify });
   diagnostics ??= new CodexDiagnostics({ store, resolveBin:()=>{engine.refreshTools();return engine.bins.codex;}, codexHome: engine.homes.codex });
   const startedAt = Date.now();
-  const view = () => ({ ...engine.view(), runtime: { app: 'Claudex', version: metadata.version, startedAt, root: path.dirname(ROOT) }, diagnostics: { codex: diagnostics.result } });
+  const integrationOptions={claudeHome:engine.homes.claude,root:path.dirname(ROOT)};
+  const desktopStatus=()=>{
+    let installed=false,error=null;
+    try {installed=integrationPreview(integrationOptions).alreadyInstalled;}catch(e){error=e.message;}
+    let connected=0;
+    try {connected=fs.readdirSync(bridgeDirectory(store.home)).filter(file=>file.endsWith('.json')&&readRegistration(store.home,file.slice(0,-5))).length;}catch{}
+    return {installed,connected,error};
+  };
+  const view = () => ({ ...engine.view(), runtime: { app: 'Claudex', version: metadata.version, startedAt, root: path.dirname(ROOT) }, diagnostics: { codex: diagnostics.result },claudeDesktop:desktopStatus() });
   let timer = null;
 
   const schedule = () => {
@@ -81,6 +91,13 @@ export function createServer({ store = createStore(), engine, diagnostics, port 
     try {
       if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { app: 'Claudex', version: metadata.version, pid: process.pid, root: path.dirname(ROOT), mode: store.config.dryRun ? 'dry' : 'real' });
       if (url.pathname === '/api/state' && req.method === 'GET') return send(res, 200, view());
+      if(url.pathname==='/api/claude-integration' && req.method==='GET')return send(res,200,integrationPreview(integrationOptions));
+      if(url.pathname==='/api/claude-integration/install' && req.method==='POST') {
+        const {expectedHash}=await readBody(req);
+        if(!/^[0-9a-f]{64}$/.test(expectedHash||''))throw new Error('请先查看接入设置的变更预览');
+        const result=installIntegration({...integrationOptions,expectedHash,backupDirectory:path.join(store.home,'backups','desktop-integration')});
+        return send(res,200,{...view(),integrationResult:result});
+      }
       if (url.pathname === '/api/test-codex' && req.method === 'POST') {
         await readBody(req);
         if (!diagnostics.start()) return send(res, 409, { error: '测试正在运行，请等待本次结果', ...view() });
@@ -106,7 +123,7 @@ export function createServer({ store = createStore(), engine, diagnostics, port 
         // 手动重试前刷新原会话，避免发送到用户已自行继续的任务。
         await engine.check({send:false});
         const now = Date.now();
-        const ready = engine.classified().filter(s => s.auto && (!keys || keys.includes(s.key)) && (!s.send || (s.send.status === 'failed' && !s.send.retryPending)) && s.recoverAt && s.recoverAt <= now);
+        const ready = engine.classified().filter(s => s.auto && (!keys || keys.includes(s.key)) && (!s.send || (s.send.status === 'failed' && !s.send.retryPending && (s.send.retryable!==false || s.send.errorCode==='desktop_unavailable'))) && s.recoverAt && s.recoverAt <= now);
         if (!ready.length) return send(res, 409, { error: '没有额度已恢复、可以发送的会话', ...view() });
         engine.sendDue({ keys: ready.map(s => s.key) });
         return send(res, 202, view());

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { proxyEnvironment, systemProxy } from './proxy.mjs';
-import { commandOutcome } from './send-result.mjs';
+import { commandOutcome, commandProgress } from './send-result.mjs';
 
 function newestFile(candidates) {
   return candidates
@@ -87,25 +87,29 @@ export function buildCommand(session, message, config, bins, {env = process.env,
       env: proxyEnvironment(config, env, detectedProxy),
     };
   }
+  if (session.entrypoint === 'claude-desktop') {
+    return {source:'claude',transport:'claude-desktop',sessionId:session.id,message,cwd,args:[]};
+  }
   return {
     source: 'claude',
     sessionId: session.id,
     bin: bins.claude,
     args: ['--print', ...(config.claude?.extraArgs || []), '--output-format', 'stream-json', '--verbose', '--resume', session.id, message],
     cwd,
-    env: proxyEnvironment(config, env, detectedProxy, 'claude'),
+    env: {...proxyEnvironment(config, env, detectedProxy, 'claude'),API_TIMEOUT_MS:env.API_TIMEOUT_MS || '60000'},
   };
 }
 
 const quote = a => (/[\s"'&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a);
-export const describeCommand = cmd =>
+export const describeCommand = cmd => cmd.transport==='claude-desktop' ?
+  `Claude Desktop 原会话 ${cmd.sessionId}：${cmd.message}` :
   [cmd.bin ? path.basename(cmd.bin) : '(未找到程序)', ...cmd.args].map(quote).join(' ');
 
 /**
  * 启动命令。会话恢复后可能要跑很久，所以子进程独立运行、输出写进日志，
  * Claudex 关掉也不影响它。返回 { pid, done }，done 在进程结束时给出退出码。
  */
-export function runCommand(cmd, { logFile }) {
+export function runCommand(cmd, { logFile, onProgress=()=>{}, startupTimeoutMs=120000, pollMs=500 }) {
   if (!cmd.bin) return { error: '没有找到对应的命令行程序' };
   if (cmd.cwd && !fs.existsSync(cmd.cwd)) return { error: `会话的工作目录不存在：${cmd.cwd}` };
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
@@ -121,10 +125,25 @@ export function runCommand(cmd, { logFile }) {
     fs.closeSync(out);
     return { error: e.message };
   }
+  let timer,forced,responded=false,progressKey='';
+  const startedAt=Date.now();
+  if(cmd.source==='claude') {
+    timer=setInterval(()=>{
+      const progress=commandProgress({logFile,sessionId:cmd.sessionId});
+      responded ||= progress.phase==='responding' || progress.phase==='complete';
+      const nextKey=JSON.stringify(progress);
+      if(nextKey!==progressKey){progressKey=nextKey;onProgress({progress});}
+      if(!responded && !forced && Date.now()-startedAt>=startupTimeoutMs) {
+        forced={code:1,error:'Claude 在两分钟内没有开始回复，已停止本次 CLI 请求；请检查连接或服务商。',errorCode:'startup_timeout',retryable:false};
+        fs.writeSync(out,JSON.stringify({type:'claudex',subtype:'startup_timeout',error:forced.error})+'\n');
+        child.kill(); // 仅停止本函数持有的子进程，不按 PID 猜测或终止桌面进程。
+      }
+    },pollMs);
+  }
   const done = new Promise(resolve => {
     child.on('error', e => resolve({ code: -1, error: e.message }));
-    child.on('close', code => resolve(commandOutcome({ source:cmd.source, sessionId:cmd.sessionId, logFile, code })));
-  }).finally(() => { try { fs.closeSync(out); } catch {} });
+    child.on('close', code => resolve(forced || commandOutcome({ source:cmd.source, sessionId:cmd.sessionId, logFile, code })));
+  }).finally(() => {clearInterval(timer);try { fs.closeSync(out); } catch {} });
   child.unref();
   return { pid: child.pid, done };
 }

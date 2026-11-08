@@ -9,6 +9,7 @@ import { relocatedWorkspace, buildCommand } from '../lib/sender.mjs';
 import { CodexDiagnostics } from '../lib/diagnostics.mjs';
 import { Engine } from '../lib/engine.mjs';
 import { createServer } from '../server.mjs';
+import metadata from '../../package.json' with {type:'json'};
 
 test('系统代理仅补到子进程，保留现有代理值且可关闭', () => {
   const registry = 'ProxyEnable    REG_DWORD    0x1\nProxyServer    REG_SZ    127.0.0.1:7890';
@@ -103,7 +104,7 @@ test('真实本机接口提供运行身份、测试防重入和代理开关，�
   const post=(route,body)=>fetch(url+route,{method:'POST',body:JSON.stringify(body)});
   try{
     const health=await (await fetch(url+'/api/health')).json();
-    assert.equal(health.app,'Claudex');assert.equal(health.version,'0.3.1');assert.equal(health.mode,'dry');
+    assert.equal(health.app,'Claudex');assert.equal(health.version,metadata.version);assert.equal(health.mode,'dry');
     const first=await post('/api/test-codex',{});assert.equal(first.status,202);
     assert.equal((await first.json()).diagnostics.codex.status,'running');
     assert.equal((await post('/api/test-codex',{})).status,409);
