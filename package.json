@@ -1,0 +1,16 @@
+{
+  "name": "claudex",
+  "version": "0.3.1",
+  "private": true,
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/kyoka-shuiyue/Claudex.git" },
+  "homepage": "https://github.com/kyoka-shuiyue/Claudex",
+  "description": "检测 Claude 与 Codex 额度，额度恢复后自动给中断的会话发送“继续”",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server/cli.mjs serve --open",
+    "scan": "node server/cli.mjs scan",
+    "test": "node --test server/test/*.test.mjs"
+  }
+}

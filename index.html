@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#F7F7F7">
+<meta name="application-name" content="Claudex">
+<title>Claudex</title>
+<link rel="icon" type="image/png" sizes="32x32" href="icon-32.png?v=0.3.0-hourglass">
+<link rel="icon" type="image/png" sizes="256x256" href="icon-256.png?v=0.3.0-hourglass">
+<link rel="stylesheet" href="claudex.css?v=0.3.0-hourglass">
+<link rel="stylesheet" href="fonts.css?v=0.3.0">
+<link rel="stylesheet" href="live.css">
+<script>
+/* 由服务打开且地址没有 ?state= 时是实时模式；带 ?state= 或 file:// 打开是演示模式（设计留档） */
+document.documentElement.dataset.mode = /^https?:$/.test(location.protocol) && !new URLSearchParams(location.search).has('state') ? 'live' : 'demo';
+// 让 Windows 启动器精确找到刚打开的 Ego 窗口，避免影响其他同名窗口。
+const launchToken = location.hash.match(/^#launch-([a-f0-9]{32})$/);
+if (launchToken && location.hostname === '127.0.0.1') {
+  document.title = 'Claudex [' + launchToken[1] + ']';
+  history.replaceState(null, '', location.pathname + location.search);
+  const initialWidth = outerWidth, initialHeight = outerHeight;
+  const restoreTitle = () => {
+    document.title = 'Claudex';
+    removeEventListener('resize', onFit);
+  };
+  const onFit = () => {
+    if (outerWidth !== initialWidth || outerHeight !== initialHeight) restoreTitle();
+  };
+  addEventListener('resize', onFit);
+  setTimeout(restoreTitle, 12000);
+}
+</script>
+</head>
+<body class="first">
+<header>
+  <div class="brand"><span class="mark"></span>Claudex</div>
+  <div class="plans"><span>Claude <b id="planClaude">Max 5x</b></span><span>Codex <b id="planCodex">ChatGPT Pro</b></span></div>
+  <button class="plan-edit" id="planEdit" type="button">套餐已自动识别 · 更改</button>
+  <div class="sp"></div>
+  <span class="chk" id="chk" aria-live="polite"></span>
+  <div class="seg" role="group" aria-label="检测间隔" id="intervalSeg">
+    <button type="button" aria-pressed="false" data-min="1">1 分</button>
+    <button type="button" aria-pressed="true" data-min="5">5 分</button>
+    <button type="button" aria-pressed="false" data-min="15">15 分</button>
+  </div>
+  <button class="btn g sm" id="checkNow" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4v5h-5"/></svg>立即检测</button>
+</header>
+
+<main class="band" id="band">
+  <div class="b-left">
+    <p class="kick" id="kick"></p>
+    <div class="cd" id="cd"></div>
+  </div>
+  <div class="b-right">
+    <div class="msg" id="bMsg"></div>
+    <div class="ctrl">
+      <div class="row">
+        <button class="sw main" type="button" role="switch" aria-checked="true" id="swAuto"><i></i>恢复后自动发送继续</button>
+        <button class="sw" type="button" role="switch" aria-checked="true" id="swNotify"><i></i>发送完成后通知我</button>
+      </div>
+      <div class="row">
+        <button class="btn g sm" type="button" id="sendNow" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 16-3-7z"/></svg>现在就发送</button>
+        <span class="hint" id="sendHint">额度恢复后才能发送</span>
+      </div>
+    </div>
+  </div>
+</main>
+
+<section class="body">
+  <div class="col">
+    <div class="ch"><h2>额度</h2><span class="note" id="qNote">每 5 分钟更新</span></div>
+    <div id="quotas"></div>
+  </div>
+
+  <div class="col">
+    <div class="ch">
+      <div class="tabs" role="tablist" id="tabs">
+        <span class="ind"></span>
+        <button type="button" role="tab" data-tab="wait" aria-selected="true">等待继续 <em></em></button>
+        <button type="button" role="tab" data-tab="sent" aria-selected="false">已发送 <em></em></button>
+        <button type="button" role="tab" data-tab="done" aria-selected="false">今日完成 <em></em></button>
+      </div>
+      <span class="note">标题从对话内容自动识别</span>
+    </div>
+    <div class="list" id="list" role="tabpanel"></div>
+  </div>
+
+  <div class="col">
+    <div class="ch"><h2>到点发送</h2><span class="note">发给每个中断的会话</span></div>
+    <div class="card" id="card"></div>
+    <div class="set">
+      <div class="srow">
+        <b id="gapLabel">逐个发送，间隔 30 秒</b>
+        <div class="seg" role="group" aria-label="发送间隔" id="gapSeg">
+          <button type="button" aria-pressed="false" data-gap="0">立即</button>
+          <button type="button" aria-pressed="true" data-gap="30">30 秒</button>
+          <button type="button" aria-pressed="false" data-gap="120">2 分钟</button>
+        </div>
+      </div>
+      <div class="srow"><button class="sw" type="button" role="switch" aria-checked="true" id="swRetry"><i></i>发送失败自动重试 1 次</button></div>
+    </div>
+    <div class="log"><h3>发送记录</h3><div id="log"></div></div>
+  </div>
+</section>
+<script src="claudex.js"></script>
+<script src="live.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+runtime/
+dist/
+work/
+memory/
+.codex/
+.claude/
+.claudex/
+node_modules/
+*.exe
+*.lnk
+*.zip
+*.log
+.env
+.env.*
+
