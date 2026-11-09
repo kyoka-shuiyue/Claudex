@@ -137,6 +137,11 @@
 
   /* ---------- 派生数据 ---------- */
   const pending = () => V.sessions.filter(s => s.auto && !s.send);
+  const currentFailures = () => V.sessions.filter(s => s.auto && s.send?.status === 'failed');
+  function sentRecords() {
+    const known = new Set(V.sent.map(r => r.key));
+    return V.sent.concat(currentFailures().filter(s => !known.has(s.key)).map(s => s.send));
+  }
   const dueNow = () => pending().filter(s => s.recoverAt != null && s.recoverAt <= nowMs());
   function derivedKey() {
     if (!V) return '';
@@ -225,7 +230,7 @@
         state: 'sending',
         kick: '<span class="tag ok">' + esc(tag) + '</span>' + (next ? '距离 ' + NAME[next.source] + ' ' + stamp(next.at) + ' 恢复还有' : '目前没有其他等待的会话'),
         cd: next ? { mode: 'count', target: next.at } : { mode: 'dash', txt: '00' },
-        msg: '<p class="eta">' + (names ? esc(names) + ' ' : '') + '额度已恢复，<br>' + (V.sending ? '正在发送继续' : '马上发送继续') + '</p>' +
+        msg: '<p class="eta">' + (names ? esc(names) + ' ' : '') + '额度已恢复，<br>' + (V.sending ? '正在发送继续' : c.autoSend ? '马上发送继续' : '等待手动发送') + '</p>' +
           '<p class="sub">' + (c.dryRun ? '演练模式：只记录要执行的命令' : gapText(c.staggerSeconds)) + '</p>' + (next ? rulerHTML(next.from, next.at) : ''),
         ruler: next ? { a: next.from, b: next.at } : null,
       };
@@ -259,7 +264,9 @@
     const known = ['codex', 'claude'].filter(k => rem[k] != null);
     const ex = ['codex', 'claude'].filter(exhausted);
     const best = known.slice().sort((a, b) => rem[b] - rem[a])[0];
-    const idle = skipped ? '目前没有等待发送的会话' : '目前没有被卡住的会话';
+    const failures = currentFailures().length;
+    const inFlight = V.sent.filter(r => r.status === 'sent' || r.status === 'unconfirmed').length;
+    const idle = '目前没有等待发送的会话';
     let kick;
     if (ex.length) kick = '<span class="tag">' + ex.map(k => NAME[k]).join(' 和 ') + ' 已用完</span>目前没有等待发送的会话';
     else if (known.length) kick = '<span class="tag ok">' + known.map(k => NAME[k]).join(' / ') + ' 额度</span>' + idle;
@@ -272,7 +279,7 @@
     return {
       state: 'clear', kick,
       cd: best ? { mode: 'pct', value: rem[best] + '%', label: NAME[best] + ' ' + remainingLabel(best) } : { mode: 'pct', value: '--', label: '暂未读到额度', stale: true },
-      msg: '<p class="eta">' + (skipped ? '没有等待发送的会话' : '没有被卡住的会话') + '</p><p class="sub">' + esc(sub) + '</p>' + (known.length ? '<div class="ruler">' + known.map(row).join('') + '</div>' : ''),
+      msg: '<p class="eta">' + (failures ? failures+' 个会话续接失败' : inFlight ? inFlight+' 条续接等待结果' : '没有等待发送的会话') + '</p><p class="sub">' + esc(sub) + '</p>' + (known.length ? '<div class="ruler">' + known.map(row).join('') + '</div>' : ''),
       ruler: null,
     };
   }
@@ -321,7 +328,9 @@
     if (!V) { btn.disabled = true; hint.textContent = '服务没有响应'; return; }
     const ready = dueNow();
     btn.disabled = !ready.length || V.sending;
-    hint.textContent = V.sending ? '正在发送…' : ready.length ? (V.config.dryRun ? '演练：只记录 ' + ready.length + ' 个会话' : '可发送 ' + ready.length + ' 个会话') : pending().length ? '额度恢复后才能发送' : '没有等待发送的会话';
+    const failed = currentFailures().length;
+    const message = V.sending ? '正在发送…' : ready.length ? (V.config.dryRun ? '可演练 ' + ready.length + ' 个会话' : '可发送 ' + ready.length + ' 个会话') : pending().length ? '额度恢复后才能发送' : '等待发送 0';
+    put(hint, message + (failed ? ' · <button class="lnk" type="button" data-show-failures>查看失败会话 '+failed+'</button>' : ''));
   }
   function renderDry() {
     const el = $('#dry'); if (!el) return;
@@ -383,7 +392,7 @@
   }
 
   /* ---------- 会话列表 ---------- */
-  const counts = () => V ? { wait: pending().length, sent: V.sent.length, skip: V.sessions.filter(s => !s.auto && !s.send).length } : { wait: 0, sent: 0, skip: 0 };
+  const counts = () => V ? { wait: pending().length, sent: sentRecords().length, skip: V.sessions.filter(s => !s.auto && !s.send).length } : { wait: 0, sent: 0, skip: 0 };
   const tabsEl = $('#tabs'), ind = $('.ind', tabsEl);
   function moveInd(anim) {
     const b = $('[aria-selected="true"]', tabsEl); if (!b) return;
@@ -409,6 +418,14 @@
     $$('[role=tab]', tabsEl).forEach(b => { const on = b.dataset.tab === t; b.setAttribute('aria-selected', String(on)); b.tabIndex = on ? 0 : -1; });
     moveInd(true); renderList(fade, true);
   }
+  $('#sendHint').addEventListener('click', e => {
+    if (!e.target.closest('[data-show-failures]')) return;
+    const first = currentFailures()[0];
+    if (!first) return;
+    setTab('sent', false);
+    const row = $$('.task', $('#list')).find(el => el.dataset.key === first.key);
+    if (row) { row.scrollIntoView({block:'nearest'}); $('.cmdbtn',row).focus({preventScroll:true}); }
+  });
 
   const emptyHTML = (b, p) => '<p class="empty"><b>' + b + '</b>' + p + '</p>';
   function pillHTML(s) {
@@ -418,6 +435,15 @@
   function statHTML(r) {
     const t = '<span class="num">' + hms(r.at) + '</span>';
     if (r.status === 'simulated') return '<span class="stat sim" title="演练：只记录了命令，没有真的发送">已演练 ' + t + '</span>';
+    if (r.transport === 'claude-desktop' && r.status !== 'failed') {
+      const phases = {starting:'正在连接',submitting:'正在投递',delivered:'桌面已收信',thinking:'Claude 正在思考',responding:'正在回复',tool_requested:'等待工具回执',tool_executed:'工具已执行',tool_error:'工具返回错误'};
+      let label = phases[r.progress?.phase] || '等待桌面确认';
+      if (r.status === 'resumed') label = r.execution?.completedTools ? (r.execution.failedTools ? '工具有成功和失败' : '工具已执行') : '旧版续接记录';
+      if (r.status === 'replied') label = '仅有文字回复';
+      if (r.status === 'unconfirmed') label = r.execution?.failedTools ? '工具结果待核对' : r.deliveredAt ? '执行待核对' : '投递待核对';
+      const color = r.status === 'resumed' && r.execution?.completedTools && !r.execution.failedTools ? '' : ' pending';
+      return '<button class="stat'+color+'" type="button" data-act="details">'+label+'</button>';
+    }
     if (r.status === 'sent') {
       const phase=r.progress?.phase,labels={starting:'正在连接',submitting:'正在投递',waiting_response:'等待模型回复',delivered:'桌面已收信',responding:'模型正在回复',retrying:'连接重试中'};
       return '<span class="stat pending" title="'+esc(sendExplanation(r))+'">'+(labels[phase]||'等待续接确认')+' '+t+'</span>';
@@ -429,6 +455,24 @@
     return '<span class="stat bad">' + (r.retryPending ? '等待重试' : '失败') + '</span>' + (retry ? '<button class="btn g sm" type="button" data-act="retry">重试</button>' : '');
   }
   function sendExplanation(r) {
+    if (r.transport === 'claude-desktop') {
+      const details = [];
+      const time = (at, label) => {
+        if (!Number.isFinite(at) || !Number.isFinite(r.at) || at < r.at) return;
+        const seconds = (at-r.at)/1000;
+        details.push(label+' '+seconds.toFixed(seconds<1?2:1)+' 秒');
+      };
+      time(r.deliveredAt, '送达'); time(r.responseAt, '首次可见响应'); time(r.executedAt, '首个工具成功');
+      if (r.execution?.completedTools || r.execution?.failedTools) {
+        details.push('工具成功 '+r.execution.completedTools+' 次'+(r.execution.failedTools?'，失败 '+r.execution.failedTools+' 次':''));
+      }
+      if (r.execution?.lastTool) details.push('最近工具 '+r.execution.lastTool);
+      if (r.status==='replied') details.push('本轮已回复文字，未见成功的工具回执');
+      else if (r.status==='resumed' && !r.execution) details.push('旧版记录只确认了模型活动');
+      else if (r.progress?.phase==='tool_requested') details.push('请在 Claude 原会话查看正在运行或等待确认的工具');
+      if (r.error) details.push(r.error);
+      if (details.length) return details.join(' · ');
+    }
     if(r.error)return r.error;
     const seconds=Math.max(0,Math.floor((nowMs()-r.at)/1000));
     if(r.progress?.phase==='retrying')return '连接失败，正在重试'+(r.progress.httpStatus?' · HTTP '+r.progress.httpStatus:'')+'；已等待 '+seconds+' 秒，尚未确认模型回复。';
@@ -449,7 +493,7 @@
     const due = s.auto && s.recoverAt != null && s.recoverAt <= nowMs();
     return rowHTML({
       key: s.key, title: s.title, skip: !s.auto, cmd: s.command, right: pillHTML(s),
-      meta: chip(s.source) + '<span><b class="num">' + stamp(s.blockedAt) + '</b> 中断</span>' + project(s.project) + (due ? '<span class="due">已到点，马上发送</span>' : ''),
+      meta: chip(s.source) + '<span><b class="num">' + stamp(s.blockedAt) + '</b> 中断</span>' + project(s.project) + (due ? '<span class="due">'+(V.config.autoSend?'已到点，等待发送':'已到点，可手动发送')+'</span>' : ''),
       why: s.auto ? '' : REASON[s.reason] || '已手动跳过',
     });
   }
@@ -466,7 +510,7 @@
       return h || emptyHTML('没有等待继续的会话', V.config.dryRun ? '因额度中断的会话会在这里排队，演练模式仅记录续接命令。' : '因额度中断的会话会在这里排队，可逐个选择是否自动继续。');
     }
     if (ui.tab === 'sent') {
-      return V.sent.map(r => rowHTML({
+      return sentRecords().map(r => rowHTML({
         key: r.key, title: r.title, cmd: r.command, right: statHTML(r),
         meta: chip(r.source) + project(r.project) + '',
         why: sendExplanation(r), bad: r.status==='failed',
@@ -538,7 +582,7 @@
       if (!result.ok) {b.disabled=false;b.textContent='重试';flashErr(b,result.err);}
     }
     else if(b.dataset.act==='details') {
-      const send=V.sent.find(item=>item.key===row.dataset.key);
+      const send=sentRecords().find(item=>item.key===row.dataset.key);
       if(send)showDetail('续接状态',sendExplanation(send));
     }
     else if (b.dataset.act === 'cmd') {
@@ -648,7 +692,8 @@
     const body = l.mode === 'dry' ? '演练 · 已记录 ' + l.count + ' 条继续请求'
       : failed ? l.count + ' 条继续请求 · <span class="bad">' + failed + ' 个失败</span>'
       : active ? '处理 ' + l.count + ' 条继续 · ' + active + ' 个等待确认'
-      : '已向 ' + l.count + ' 个会话发送继续 · <span class="ok">全部接上</span>';
+      : l.items?.some(r=>r.status==='replied') ? '已收到 '+l.count+' 条续接结果 · '+l.items.filter(r=>r.status==='replied').length+' 条仅有文字回复'
+      : '已收到 ' + l.count + ' 条续接结果';
     const changed = put($('#log'), '<div class="it"><b>' + dayStamp(l.at) + '</b>' + body + '</div>', 'log');
     if (changed && index === 0 && lastLogAt != null && l.at > lastLogAt && !reduce) $('#log .it').classList.add('new');
     lastLogAt = logs[0].at;
@@ -711,7 +756,7 @@
     let preview;
     try {const response=await fetch('/api/claude-integration',{signal:AbortSignal.timeout(8000)});preview=await response.json();if(!response.ok)throw new Error(preview.error);}
     catch(error){showDetail('Claude 接入',error.message||'无法读取接入设置');return;}
-    if(preview.alreadyInstalled){showDetail('Claude 桌面接入已安装','新启动或恢复的会话会自动接入。已经运行但尚未接入的会话，需要重新启动该会话进程。投递通过原桌面会话处理，消息送达与模型回复分别确认。');return;}
+    if(preview.alreadyInstalled){showDetail('Claude 桌面接入已安装','新启动或恢复的会话会自动接入。桌面将续接识别为同伴消息，沿用原会话权限。发送记录可查看收信、文字回复及工具回执。需要批准操作时，请在 Claude 原会话确认。已经运行但尚未接入的会话，需要重新打开该会话。');return;}
     const dialog=document.createElement('dialog');dialog.className='detail-dialog';
     dialog.innerHTML='<h3>启用 Claude 桌面接入</h3><p>将为 Claude 添加一个 SessionStart 钩子，让 Claudex 能向已登录的原桌面会话发送续接消息。会先备份设置，并保留已有条目。</p><p class="integration-path"></p><p>新启动或恢复的会话接入后生效。</p><div class="row"><button class="btn g sm" data-integration="cancel">取消</button><button class="btn p sm" data-integration="install">备份并安装接入</button></div>';
     $('.integration-path',dialog).textContent=preview.file+'\n'+preview.command;

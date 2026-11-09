@@ -52,11 +52,25 @@ test('投递回执断开后保留去重占位；后台恢复仍可认出迟到�
  assert.equal(rec.status,'unconfirmed');assert.equal(rec.requestId,requestId);
  const uuid='12345678-aaaa-4234-8234-123456789abc';
  const transcriptFile=path.join(store.home,`${desktop.id}.jsonl`);
- fs.writeFileSync(transcriptFile,[{type:'user',sessionId:desktop.id,uuid,timestamp:new Date().toISOString()}, {type:'assistant',sessionId:desktop.id,message:{content:[{type:'text',text:'已经继续'}]}}].map(r=>JSON.stringify(r)).join('\n')+'\n');
+ fs.writeFileSync(transcriptFile,[{type:'user',sessionId:desktop.id,uuid,timestamp:new Date().toISOString()}, {type:'assistant',sessionId:desktop.id,message:{stop_reason:'end_turn',content:[{type:'text',text:'已经继续'}]}}].map(r=>JSON.stringify(r)).join('\n')+'\n');
  writePrivateJson(receiptFile(store.home,requestId),{id:desktop.id,uuid,at:rec.at,transcriptFile,status:'uncertain'});
  engine.recoverSends();
- assert.equal(rec.status,'resumed');assert.equal(rec.error,null);assert.equal(rec.confirmedBy,'desktop-transcript');
+ assert.equal(rec.status,'replied');assert.equal(rec.error,null);assert.equal(rec.confirmedBy,'desktop-transcript');
  assert.equal(rec.messageUuid,uuid);
+});
+
+test('桌面添加同伴说明后仍按同一投递认领失败；下一条人类消息解除认领',async()=>{
+ const {store,engine}=setup(), now=Date.now(), id=desktop.id,home=engine.homes.claude;
+ claudeSession(home,{id,cwd:home,blockedAt:now-3600000,text:claudeResetText(now-120000)});
+ await engine.check({send:false});
+ const original=engine.classified()[0],uuid='original-user-message',file=path.join(home,'projects/C--work-claudex',id+'.jsonl');
+ store.state.sends[original.key]={...original,at:now,mode:'real',status:'failed',message:store.config.message,transport:'claude-desktop',messageUuid:uuid};
+ const append=r=>fs.appendFileSync(file,JSON.stringify({sessionId:id,cwd:home,entrypoint:'claude-desktop',timestamp:new Date(now+1000).toISOString(),...r})+'\n');
+ append({type:'user',uuid,isMeta:true,origin:{kind:'peer'},message:{content:'Another Claude session sent a message:\n'+store.config.message+'\n\nplatform attribution'}});
+ append({type:'assistant',isApiErrorMessage:true,error:'api_error',message:{content:[{type:'text',text:'unavailable'}]}});
+ await engine.check({send:false});assert.equal(engine.classified()[0]?.key,original.key);
+ append({type:'user',uuid:'human',message:{content:store.config.message}});
+ await engine.check({send:false});assert.equal(engine.classified().length,0);
 });
 
 test('CLI 请求在首个回复前失败，自己的用户消息仍可认领；接入失败重试后不丢原中断',async()=>{
@@ -75,4 +89,18 @@ test('CLI 请求在首个回复前失败，自己的用户消息仍可认领；�
  fs.appendFileSync(file,JSON.stringify({type:'user',sessionId:id,entrypoint:'claude-desktop',timestamp:new Date().toISOString(),message:{content:'我已自行继续'}})+'\n');
  await engine.check({send:false});
  assert.equal(engine.classified().length,0);
+});
+
+test('升级时重新核对旧版已接上记录，保留去重标识并纠正首个可见响应时间',()=>{
+ const {engine,store}=setup(),at=Date.now()-60000,id=desktop.id,uuid='old-receipt',key='prior-delivery';
+ const transcriptFile=path.join(store.home,id+'.jsonl'),requestId='f'.repeat(64);
+ const rec={key,id,source:'claude',requestId,messageUuid:uuid,at,mode:'real',transport:'claude-desktop',status:'resumed',responseAt:at+1,finishedAt:at+2};
+ store.state.sends[key]=rec;
+ const write=(ms,r)=>JSON.stringify({sessionId:id,timestamp:new Date(at+ms).toISOString(),...r});
+ fs.writeFileSync(transcriptFile,[write(0,{type:'user',uuid}),write(5,{type:'assistant',uuid:'a',parentUuid:uuid,message:{content:[{type:'thinking'}]}}),write(20,{type:'assistant',parentUuid:'a',message:{stop_reason:'end_turn',content:[{type:'text',text:'收到'}]}})].join('\n')+'\n');
+ writePrivateJson(receiptFile(store.home,requestId),{id,uuid,at,transcriptFile,status:'submitted'});
+ engine.desktopRunner=()=>{throw Error('旧记录不可重新发送');};
+ engine.recoverSends();engine.recoverSends();
+ assert.equal(rec.requestId,requestId);assert.equal(rec.messageUuid,uuid);assert.equal(rec.status,'replied');
+ assert.equal(rec.responseAt,at+20);assert.equal(rec.execution.completedTools,0);assert.equal(rec.finishedAt,at+20);
 });

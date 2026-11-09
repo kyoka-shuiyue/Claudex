@@ -231,7 +231,18 @@ test('真实批次等待期间切回演练，后续会话只演练', async () =>
   assert.equal(result.results[1].status, 'simulated');
 });
 
-for (const cancel of [null, 'skip', 'dry', 'retry-off']) {
+test('关闭自动发送取消自动批次未启动的项，仍可显式手动发送', async () => {
+  const {engine,store,runs}=setup({dryRun:false});
+  await engine.check({send:false});
+  engine.setAuto(engine.classified().find(s=>s.reason==='excluded').key,true);
+  engine.wait=async()=>store.updateConfig({autoSend:false});
+  await engine.sendDue();
+  assert.equal(runs.length,1);
+  const remaining=engine.classified().find(s=>s.status==='due');
+  await engine.sendDue({keys:[remaining.key]});assert.equal(runs.length,2);
+});
+
+for (const cancel of [null, 'skip', 'dry', 'retry-off', 'auto-off']) {
   test(`异步失败等待期间保留去重记录，只允许一次配置重试：${cancel || '重试'}`, async () => {
     const { engine, store } = setup({ dryRun: false });
     store.updateConfig({ retry: true });
@@ -249,6 +260,7 @@ for (const cancel of [null, 'skip', 'dry', 'retry-off']) {
     if (cancel === 'skip') engine.setAuto(key, false);
     if (cancel === 'dry') store.updateConfig({ dryRun: true });
     if (cancel === 'retry-off') store.updateConfig({ retry: false });
+    if (cancel === 'auto-off') store.updateConfig({ autoSend: false });
     release();
     await new Promise(r => setImmediate(r));
     assert.equal(calls, cancel ? 1 : 2);
@@ -275,6 +287,26 @@ test('现在就发送接口拒绝跳过的会话', async () => {
     assert.equal(response.status, 409);
     assert.equal(runs.length, 0);
   } finally { app.stop(); }
+});
+
+test('手动发送遇到另一批正在等待时返回忙碌，不能回报已受理后丢掉请求',async()=>{
+  const {engine,store}=setup({dryRun:false});
+  store.updateConfig({autoSend:false,retry:true});
+  const app=createServer({store,engine,port:0}),base=await app.start();
+  let release,ongoing;
+  try {
+    engine.setAuto(engine.classified().find(s=>s.reason==='excluded').key,true);
+    const [a,b]=engine.classified().filter(s=>s.status==='due');
+    engine.runner=()=>({error:'fixture'});
+    engine.wait=()=>new Promise(resolve=>{release=resolve;});
+    ongoing=engine.sendDue({keys:[a.key]});
+    const res=await fetch(base+'/api/send-now',{method:'POST',body:JSON.stringify({keys:[b.key]})});
+    assert.equal(res.status,409);
+    assert.match((await res.json()).error,/发送中/);
+    assert.equal(store.state.sends[b.key],undefined);
+  } finally {
+    store.updateConfig({retry:false});release?.();await ongoing;app.stop();
+  }
 });
 
 for (const cancel of [false, true]) {

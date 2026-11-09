@@ -5,9 +5,10 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readTailRecords } from './jsonl.mjs';
-import { safeError } from './send-result.mjs';
+import { desktopOutcome } from './desktop-turn.mjs';
 import { integrationPreview } from './claude-integration.mjs';
+
+export { desktopOutcome };
 
 export const validSessionId = value => /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value || '');
 export const requestKey = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -62,39 +63,12 @@ export function bridgeRequest(registration, request, {timeoutMs=3000}={}) {
   });
 }
 
-const textOf = rec => typeof rec?.message?.content==='string' ? rec.message.content :
-  (rec?.message?.content || []).map(block=>block.text || '').join(' ');
-
 export function openDesktopSession(id) {
   if(process.platform!=='win32'||!validSessionId(id))return Promise.resolve(false);
   return new Promise(resolve=>{
     execFile('powershell.exe',['-NoProfile','-WindowStyle','Hidden','-Command','Start-Process -FilePath $env:CLAUDEX_SESSION_URL -WindowStyle Hidden'],
       {env:{...process.env,CLAUDEX_SESSION_URL:`claude://resume?session=${id}`},windowsHide:true,timeout:8000},error=>resolve(!error));
   });
-}
-
-export function desktopOutcome(receipt,{now=Date.now(),deliveryTimeoutMs=15000,responseTimeoutMs=180000}={}) {
-  if (!receipt || !['submitting','submitted','uncertain'].includes(receipt.status)) return receipt || {status:'failed',code:1,error:'没有桌面投递记录'};
-  let records=[];
-  try {records=readTailRecords(receipt.transcriptFile,{start:65536,enough:rs=>rs.some(r=>r.uuid===receipt.uuid)});} catch {}
-  const sameSession=record=>!(record.sessionId||record.session_id)||(record.sessionId||record.session_id)===receipt.id;
-  const userIndex=records.findIndex(r=>r.type==='user' && r.uuid===receipt.uuid && sameSession(r));
-  const user=records[userIndex];
-  if (!user) {
-    if(now-receipt.at>=deliveryTimeoutMs)return {status:'unconfirmed',code:1,errorCode:'delivery_unknown',retryable:false,error:'尚未在原桌面会话确认收信，请查看 Claude；为避免重复，没有自动重发。',progress:{phase:'unconfirmed'}};
-    return {status:'sent',progress:{phase:'submitting'}};
-  }
-  const deliveredAt=Date.parse(user.timestamp)||receipt.at;
-  // 不把之后由用户另发的一轮回复算作本次续接的成功。
-  for(const record of records.slice(userIndex+1)) {
-    if(!sameSession(record))continue;
-    if(record.type==='user' && record.uuid!==receipt.uuid)break;
-    if(record.type!=='assistant')continue;
-    if(record.isApiErrorMessage || record.error)return {status:'failed',code:1,deliveredAt,errorCode:'desktop_api_error',retryable:true,error:safeError(textOf(record)||record.error),progress:{phase:'failed'}};
-    if(record.message?.content?.length)return {status:'resumed',code:0,deliveredAt,responseAt:Date.parse(record.timestamp)||now,confirmedBy:'desktop-transcript',progress:{phase:'responding'}};
-  }
-  if(now-deliveredAt>=responseTimeoutMs)return {status:'unconfirmed',code:1,deliveredAt,errorCode:'reply_timeout',retryable:false,error:'消息已到原桌面会话，暂未看到模型回复；仍在监测，请在 Claude 查看当前状态。',progress:{phase:'waiting_response'}};
-  return {status:'sent',deliveredAt,progress:{phase:'delivered'}};
 }
 
 export function readDesktopReceipt(home,key) {
@@ -114,6 +88,12 @@ export async function runDesktopCommand(command,{home,claudeHome,logFile,onProgr
   }
   if(!registration)return {error:'原会话尚未接入 Claude 桌面。启用本地会话接入并重新打开该会话后重试。',errorCode:'desktop_unavailable',retryable:false};
   const key=command.requestId;
+  // 重放已有投递时须能找到原先的消息，不能从当前文件末尾起算。
+  let startOffset;
+  if (!readDesktopReceipt(home,key)) {
+    try { startOffset=fs.statSync(registration.transcriptFile).size; } catch {}
+    if (startOffset != null) onProgress({transcriptOffset:startOffset});
+  }
   const response=await bridgeRequest(registration,{type:'send',key,message:command.message});
   const receipt=readDesktopReceipt(home,key);
   if(response.error && !receipt)return {...response,requestId:key,status:response.errorCode==='delivery_unknown'?'unconfirmed':'failed',retryable:false};
@@ -122,7 +102,7 @@ export async function runDesktopCommand(command,{home,claudeHome,logFile,onProgr
   fs.appendFileSync(logFile,JSON.stringify({transport:'claude-desktop',sessionId:command.sessionId,requestId:key,uuid:receipt.uuid,at:receipt.at})+'\n');
   const done=new Promise(resolve=>{
     const poll=()=>{
-      const outcome=desktopOutcome(readDesktopReceipt(home,key));
+      const outcome=desktopOutcome(readDesktopReceipt(home,key),{startOffset});
       onProgress(outcome);
       if(outcome.status!=='sent')return resolve(outcome);
       const timer=setTimeout(poll,pollMs);timer.unref();

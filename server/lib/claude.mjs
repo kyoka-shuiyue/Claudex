@@ -49,8 +49,9 @@ function failedContinuation(records, attempt, message) {
   if (!user || !(last===user || last?.type==='assistant'&&last.isApiErrorMessage)) return null;
   const submitted=Date.parse(user.timestamp);
   const owned=[attempt,attempt.lastConfirmedSubmission,attempt.previousSubmission].filter(Boolean).some(submission=>{
-    const matches = submission.transport==='claude-desktop' ? !!submission.messageUuid && user.uuid===submission.messageUuid : user.entrypoint==='sdk-cli';
-    return matches && submitted>=submission.at-2000 && submitted<=submission.at+120000 && textOf(user)===(submission.message || message);
+    // 桌面会在正文外添加同伴来源说明；原会话和随机消息 UUID 可以直接确认归属。
+    if (submission.transport==='claude-desktop') return !!submission.messageUuid && user.uuid===submission.messageUuid && user.sessionId===attempt.id;
+    return user.entrypoint==='sdk-cli' && submitted>=submission.at-2000 && submitted<=submission.at+120000 && textOf(user)===(submission.message || message);
   });
   if (!owned) return null;
   const original=records.find(r=>isLimitRecord(r) && Date.parse(r.timestamp)===attempt.blockedAt);

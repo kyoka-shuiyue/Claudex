@@ -107,15 +107,20 @@ export class Engine {
     for (const rec of Object.values(this.state.sends)) {
       if (rec.mode !== 'real') continue;
       if(rec.transport==='claude-desktop') {
-        if(!['sent','unconfirmed'].includes(rec.status) || !rec.requestId)continue;
+        // 旧版在首个思考块就停止观察。近期历史仅重新核对原回执，不重新投递。
+        const legacy=rec.status==='resumed' && !rec.execution && this.now()-rec.at<24*HOUR;
+        if((!legacy && !['sent','unconfirmed'].includes(rec.status)) || !rec.requestId)continue;
         const receipt=readDesktopReceipt(this.store.home,rec.requestId);
         if(!receipt)continue;
-        const outcome=desktopOutcome(receipt,{now:this.now()});
+        const outcome=desktopOutcome(receipt,{now:this.now(),startOffset:rec.transcriptOffset});
+        if(rec.deliveredAt && !outcome.deliveredAt)continue;
         const before=JSON.stringify(rec);
+        if(legacy){delete rec.responseAt;delete rec.finishedAt;delete rec.confirmedBy;}
         Object.assign(rec,outcome);
         rec.messageUuid ||= receipt.uuid;
         if(outcome.deliveredAt)rec.lastConfirmedSubmission=submissionOf(rec);
-        if(outcome.status==='resumed') {rec.error=null;rec.errorCode=null;rec.finishedAt=this.now();}
+        if(!outcome.error) {rec.error=null;rec.errorCode=null;}
+        if(['replied','resumed'].includes(outcome.status)) rec.exitCode=0;
         if(before!==JSON.stringify(rec))this.updateBatch(rec);
         continue;
       }
@@ -203,6 +208,7 @@ export class Engine {
     try {
       for (let i = 0; i < list.length; i++) {
         if (i > 0) await this.wait(this.config.staggerSeconds * 1000);
+        if (!keys && !this.config.autoSend) break;
         // 等待期间允许用户跳过、切换演练或由最新扫描移除会话。
         const current = this.classified().find(s => s.key === list[i].key);
         if (!current || !eligible(current)) continue;
@@ -226,7 +232,7 @@ export class Engine {
     this.store.saveState();
     await this.check({send:false});
     const current = this.classified().find(item => item.key === s.key);
-    if (!current?.auto || this.config.dryRun || !this.config.retry) return rec;
+    if (!current?.auto || !this.config.autoSend || this.config.dryRun || !this.config.retry) return rec;
     if (current.recoverAt != null && current.recoverAt + this.config.graceSeconds * 1000 > this.now()) return rec;
     const retried = await this.sendOne(current, false, 2, rec.batch);
     this.updateBatch(retried);
@@ -285,14 +291,14 @@ export class Engine {
       const {code,error}=outcome;
       Object.assign(cur,outcome);
       cur.exitCode = code;
-      cur.finishedAt = this.now();
+      cur.finishedAt = outcome.finishedAt ?? this.now();
       if(outcome.status==='unconfirmed')cur.status='unconfirmed';
       else if (code !== 0 || error) {
         cur.status = 'failed';
         cur.error = error || `退出码 ${code}`;
       }
       else {
-        cur.status = 'resumed';
+        cur.status = outcome.status === 'replied' ? 'replied' : 'resumed';
         cur.error=null;cur.errorCode=null;
       }
       this.updateBatch(cur);

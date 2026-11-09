@@ -125,6 +125,7 @@ export function createServer({ store = createStore(), engine, diagnostics, port 
         const now = Date.now();
         const ready = engine.classified().filter(s => s.auto && (!keys || keys.includes(s.key)) && (!s.send || (s.send.status === 'failed' && !s.send.retryPending && (s.send.retryable!==false || s.send.errorCode==='desktop_unavailable'))) && s.recoverAt && s.recoverAt <= now);
         if (!ready.length) return send(res, 409, { error: '没有额度已恢复、可以发送的会话', ...view() });
+        if (engine.sending) return send(res, 409, { error: '另一批续接正在发送中，本次请求未提交，请稍后再试。', ...view() });
         engine.sendDue({ keys: ready.map(s => s.key) });
         return send(res, 202, view());
       }

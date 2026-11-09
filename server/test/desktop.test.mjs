@@ -28,7 +28,7 @@ async function fixture({reply=true,accept=true}={}) {
     if(!accept)continue;
     const append=record=>fs.appendFileSync(transcriptFile,JSON.stringify({sessionId:id,entrypoint:'claude-desktop',timestamp:new Date().toISOString(),...record})+'\n');
     append(message);
-    if(reply)append({type:'assistant',parentUuid:message.uuid,message:{content:[{type:'text',text:'已继续原任务'}]}});
+    if(reply)append({type:'assistant',parentUuid:message.uuid,message:{stop_reason:'end_turn',content:[{type:'text',text:'已继续原任务'}]}});
    }
   });
  });
@@ -46,7 +46,8 @@ test('会话子进程本地投递：消息 UUID 落入原桌面记录且模型�
   const key=requestKey('real-call-site'),logFile=path.join(f.home,'run.log'),updates=[];
   const run=await runDesktopCommand({sessionId:id,requestId:key,message:'继续'}, {home:f.home,logFile,pollMs:10,onProgress:o=>updates.push(o)});
   const result=await run.done;
-  assert.equal(result.status,'resumed');assert.equal(result.confirmedBy,'desktop-transcript');
+  assert.equal(result.status,'replied');assert.equal(result.confirmedBy,'desktop-transcript');
+  assert.equal(result.execution.completedTools,0);
   assert.equal(f.messages.length,1);assert.equal(f.messages[0].uuid,run.messageUuid);
   assert.ok(result.deliveredAt);assert.ok(result.responseAt);
   assert.ok(!fs.readFileSync(logFile,'utf8').includes(f.registration.token));
@@ -65,7 +66,7 @@ test('1000 次并发重复请求只投递一次；重新连接仍沿用持久去
   await wait(20);
   assert.equal(f.messages.length,1);
   const receipt=readDesktopReceipt(f.home,key);
-  assert.equal(desktopOutcome(receipt).status,'resumed');
+  assert.equal(desktopOutcome(receipt).status,'replied');
   const replay=await bridgeRequest(readRegistration(f.home,id),request);
   assert.equal(replay.ok,true);assert.equal(f.messages.length,1);
  } finally {await f.close();}
@@ -132,8 +133,8 @@ test('回执丢失或收信确认迟到时，继续核对同一 UUID，不重复
   writePrivateJson(receiptFile(f.home,key),receipt);
   assert.equal(desktopOutcome(receipt,{now:receipt.at+30000}).status,'unconfirmed');
   fs.appendFileSync(f.transcriptFile,JSON.stringify({type:'user',uuid:receipt.uuid,sessionId:id,timestamp:new Date().toISOString()})+'\n');
-  fs.appendFileSync(f.transcriptFile,JSON.stringify({type:'assistant',sessionId:id,message:{content:[{type:'text',text:'收到迟到的消息并开始执行'}]}})+'\n');
-  assert.equal(desktopOutcome(receipt).status,'resumed');
+  fs.appendFileSync(f.transcriptFile,JSON.stringify({type:'assistant',sessionId:id,message:{stop_reason:'end_turn',content:[{type:'text',text:'收到迟到的消息并开始执行'}]}})+'\n');
+  assert.equal(desktopOutcome(receipt).status,'replied');
   await bridgeRequest(f.registration,{type:'send',key,message:'继续'});await wait(10);
   assert.equal(f.messages.length,1);
  } finally {await f.close();}
