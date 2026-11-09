@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="228" viewBox="0 0 1200 228" role="img" aria-labelledby="title desc">
+  <title id="title">从额度中断到原会话续接</title>
+  <desc id="desc">识别因额度用尽而中断的会话，等到额度恢复后，将继续消息发回原会话。</desc>
+  <rect x="1" y="1" width="1198" height="226" rx="20" fill="#f4f3eb" stroke="#d6dbce" stroke-width="2"/>
+
+  <g id="timeline" fill="none" stroke="#83957c" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M266 77H516m-13-10 13 10-13 10"/>
+    <path d="M669 77h247m-13-10 13 10-13 10"/>
+  </g>
+
+  <g id="limit" transform="translate(201 77)">
+    <circle r="48" fill="#f4e1d3"/>
+    <g fill="none" stroke="#985436" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M-22-20h44a5 5 0 0 1 5 5v27a5 5 0 0 1-5 5H-3l-12 10v-10h-7a5 5 0 0 1-5-5v-27a5 5 0 0 1 5-5Z"/>
+      <path d="M-6-9v14M7-9v14"/>
+    </g>
+  </g>
+  <g id="recovery" transform="translate(600 77)">
+    <circle r="48" fill="#dde5d5"/>
+    <g fill="none" stroke="#496747" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M-19-24h38m-38 48h38"/>
+      <path d="M-16-23v6c0 9 9 13 16 17-7 4-16 8-16 17v6m32-46v6c0 9-9 13-16 17 7 4 16 8 16 17v6"/>
+    </g>
+    <path d="M-10 18 0 9l10 9Z" fill="#ba7654"/>
+  </g>
+  <g id="resume" transform="translate(999 77)">
+    <circle r="48" fill="#345640"/>
+    <g fill="none" stroke="#fffef8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M-23-21h46a5 5 0 0 1 5 5v28a5 5 0 0 1-5 5H-3l-12 10v-10h-8a5 5 0 0 1-5-5v-28a5 5 0 0 1 5-5Z"/>
+      <path d="M12-9v6a5 5 0 0 1-5 5H-10m6-7-7 7 7 7"/>
+    </g>
+  </g>
+
+  <g id="labels" fill="#263c2d" text-anchor="middle" font-family="system-ui,'Microsoft YaHei','PingFang SC','Noto Sans CJK SC',sans-serif" font-size="46" font-weight="650">
+    <text x="201" y="184">额度中断</text>
+    <text x="600" y="184">等待恢复</text>
+    <text x="999" y="184">原会话续接</text>
+  </g>
+</svg>
